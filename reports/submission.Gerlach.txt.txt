@@ -1,0 +1,341 @@
+/*New Wheels Data searches*/
+
+/*Q1. Find the distribution of customers across the United States:*/
+/* First step: using CTE, count total customers, and number of customers per state:*/
+With state_cust as (
+Select distinct state, country,
+    count(country) over (partition by country) as total_cust,
+	count(customer_id) over (partition by state) as per_state
+
+FROM customer_t
+order by 1)
+
+/* second step: figure out the percentage ratios:*/
+select  state, per_state, per_state/total_cust as cust_pct
+
+FROM state_cust
+order by 1;
+/*__________________________________________________*/
+/*Q2. Average rating in each quarter:*/
+/* First step: using CTE, give ratings a numberical value:*/
+
+With rating as (
+    select order_id, quarter_number, customer_feedback,  
+		case when customer_feedback = 'Very Bad' then 1 
+		when customer_feedback = 'Bad' then 2
+		when customer_feedback = 'Okay' then 3
+		when customer_feedback = 'Good' then 4
+		when customer_feedback = 'Very Good' then 5
+	else 0 end as rating_no
+    
+FROM order_t 
+order by 2)
+
+/* second, average the ratings and sort by quarter number:*/
+Select distinct quarter_number, 
+	avg(rating_no) over (partition by quarter_number) as average_rating
+
+FROM rating;
+/*__________________________________________________*/
+/*Q3. How does customer satisfaction change over time?*/
+/* First to give a numerical value to the rating, and */
+
+With rating as (
+    select order_id, quarter_number, customer_id, customer_feedback, 
+		case when customer_feedback = 'Very Bad' then 1 
+		when customer_feedback = 'Bad' then 2
+		when customer_feedback = 'Okay' then 3
+		when customer_feedback = 'Good' then 4
+		when customer_feedback = 'Very Good' then 5
+	else 0 end as satisfaction
+		
+FROM order_t 
+order by 2,4)
+
+/*secondly, calculater and group the averages by satisfaction level and quarter number*/
+/*I eliminated duplicates in excel, and then redid the formula to evaluate age of car (see appendix 1)*/
+
+select quarter_number, 
+    customer_feedback, satisfaction, 
+    count(order_id) over (partition by satisfaction, quarter_number) as sat_ct, 
+    count(order_id) over (partition by quarter_number) as tot_per_qtr,
+    round((count(order_id) over (partition by satisfaction, quarter_number) )/count(order_id) over (partition by quarter_number),2) as tot_qtr_pct 
+    
+FROM rating 
+order by 1,4;
+/*__________________________________________________*/
+/*Q4. Which are the top 5 vehicle makers preferred by customers?*/
+/* use a CTE to count the number of vehicles (order times quantity) by brand*/
+
+With auto_ct as (
+	SELECT pt.product_id, ot.customer_id, pt.vehicle_maker, 
+	count(ot.customer_id) over (partition by pt.vehicle_maker) as Maker_ct
+        
+FROM product_t as PT
+JOIN order_t as OT USING(product_id)
+order by 4 DESC)
+
+/* then eliminate duplicates and list the top five*/
+select distinct vehicle_maker, maker_ct 
+
+FROM auto_ct Limit 5;
+/*__________________________________________________*/
+/*Q5. What is the preferred vehicle make in each state?*/
+/* I used a CTE to count the brands sold per state*/
+/* ***I removed sales of single cars per state from the data to minimize data noise. */
+/* I used a CTE to count the brands sold per state*/
+
+With Prefered_Auto as (
+SELECT state, vehicle_maker, 
+	dense_RANK() OVER (PARTITION BY state ORDER BY no_auto_state DESC) AS Sales_RANK,
+	no_auto_state
+from Auto_by_state
+where no_auto_state!= 1)
+
+/*Then I eliminated duplicates and listed only the top ranked makers.*/
+SELECT distinct state, vehicle_maker, sales_rank, no_auto_state
+
+from Prefered_Auto
+where Sales_rank = 1;
+
+/*Then I realized that I hadn't followed the directions and used customers as my rank basis.*/
+/*First a CTE to establish number of brands bought in each state and customers per state to dbl check numbers*/
+
+With state_counts as (  
+SELECT state,   
+	vehicle_maker,   
+	count(customer_id) over (partition by state) as state_cust,  
+	count(customer_id) over (partition by state, vehicle_maker) as state_brand_ct     
+
+/*the CTE required connecting three tables to connect the state to the brand.*/  
+from product_t as PT  
+join order_t as OT using(product_id)    
+join customer_t as CT using(customer_id)  
+order by 1,2)      
+
+/*then the state counts were ranked by brand*/
+/* Again, I eliminated the makers with only a single car to reduce data noise*/
+Select distinct state_brand_ct, state_cust, 
+	rank() over(partition by state order by state_brand_ct DESC) as state_rank,  
+	state, vehicle_maker 
+
+from state_counts 
+where state_brand_ct != 1 
+order by 4 
+
+/*__________________________________________________*/
+/*Q6. What is the trend of number of orders by quarters?*/
+/* Second I charted, the current and previous quarters, and calculated the difference.*/
+select quarter_number, tot_orders, qtr_orders as current_qtr, 
+	lag(qtr_orders) over(order by quarter_number) as prev_qtr,
+    Round((qtr_orders - (lag(qtr_orders) over(order by quarter_number)))
+		/(lag(qtr_orders) over(order by quarter_number)),2) as pct_chg
+
+/*First I did a backwards CTE counting the total orders, and orders per quarter.*/
+from (
+	select distinct quarter_number, 
+		count(order_id)over (partition by quarter_number) as qtr_orders,
+		count(order_id)over (partition by country) as tot_orders
+        
+from order_t as OT
+join customer_t as CT using(customer_id)) as orders
+order by 1;
+    
+/* but the number of orders is not the same as the number of vehicles;*/
+/* for that I used the following formula:*/
+/* to find out the total number of vehicles sold:*/
+
+select quarter_number, sum(quantity)  as total_order
+
+from order_t
+group by 1 order by 2;
+/*__________________________________________________*/
+/*Q7. What is the quarter over quarter % change in revenue?*/
+/*First I added up the revenue per quarter, incl credit card discount:*/
+
+With qtr_revenue as (
+    select quarter_number, 
+    round(sum((vehicle_price*quantity)*(1-discount)),2) as tot_price
+    
+from order_t
+group by 1 order by 1)
+
+/*Second involved comparing last quarter's to this quarter and calculating the percent change*/
+
+Select quarter_number, tot_price, 
+   lag(tot_price,1) over(order by quarter_number) as prev_price, 
+   Round(((tot_price - (lag(tot_price,1) over(order by quarter_number)))*100
+		/(lag(tot_price,1) over(order by quarter_number))),0) as chg_pct
+	
+from qtr_revenue
+group by 1 order by 1;
+/*__________________________________________________*/
+/*Q8. What is the trend of revenue and orders by quarters?*/
+/*Count the orders and add the total revenue for each quarter*/
+
+With current_qtr as (
+	select distinct quarter_number,     
+		count(order_id) over (partition by quarter_number) as qtr_orders,     
+		round(sum((vehicle_price*quantity)*(1-discount)) over(partition by quarter_number),2) as qtr_revenue  
+from order_t)
+
+/*Calculate the lag and change between quarters for all orders*/
+Select quarter_number, qtr_orders,
+   lag(qtr_orders,1) over(order by quarter_number) as prev_orders, 
+   Round(((qtr_orders - (lag(qtr_orders,1) over(order by quarter_number)))*100
+		/(lag(qtr_orders,1) over(order by quarter_number))),0) as order_chg_pct,
+        
+/*continue by calculating the lag and change between quarters for revenue*/        
+	qtr_revenue,
+	lag(qtr_revenue,1) over(order by quarter_number) as prev_rev, 
+	Round(((qtr_revenue - (lag(qtr_revenue,1) over(order by quarter_number)))*100
+		/(lag(qtr_revenue,1) over(order by quarter_number))),0) as revenue_chg_pct
+
+from current_qtr
+order by 1;
+/*__________________________________________________*/
+/*Q9. What is the average discount offered for different types of credit cards?*/
+/*The script separates credit cards by type, then averages the discount of each*/
+
+select distinct ct.credit_card_type, 
+    round(avg(ot.discount) over (partition by ct.credit_card_type),3) as avg_disc
+    
+from order_t as OT
+join customer_t as CT using (customer_id)
+order by 1;
+/*__________________________________________________*/
+/*Q10. What is the average time taken to ship the placed orders for each quarters?*/
+/*First step was to calculate the number of days between order and ship dates per order*/
+
+With Wait_count as (
+select quarter_number, order_id, order_date, ship_date,
+    datediff(ship_date,order_date) as no_of_days
+	
+from order_t
+order by 3)  
+
+/*then average the wait times for each quarter*/
+select distinct quarter_number, 
+	round(avg(no_of_days) over(partition by quarter_number),0) as Wait_in_days
+	
+from Wait_count;
+/*__________________________________________________*/
+/*Appendix. But questions remain...*/
+/*App 1. Is there a relationship between the age of the car and customer satisfaction?*/
+/*First I needed to create a table to categorize ages of cars, and give numerical names to satisfaction levels:*/
+
+With Vehicle_analysis as (
+Select quarter_number, product_id,
+	vehicle_model_year, 
+	case when vehicle_model_year <=1975 then 'Antique'
+			when vehicle_model_year between 1976 and 1999 then 'Classic'
+			when vehicle_model_year >=2000 then 'Used'
+			else 0 end as Vehicle_cat,
+	customer_feedback,
+	case when customer_feedback = 'Very Bad' then 1 
+			when customer_feedback = 'Bad' then 2
+			when customer_feedback = 'Okay' then 3
+			when customer_feedback = 'Good' then 4
+			when customer_feedback = 'Very Good' then 5
+		else 0 end as satisfaction
+        
+from product_t      
+join order_t using(product_id, vehicle_price)  
+order by 1,4)
+    
+ /*Second I needed to group the information by vehicle age, and then average the ratings.*/   
+select quarter_number, vehicle_model_year, vehicle_cat,
+		count(vehicle_cat) over (partition by vehicle_cat, quarter_number) as type_count,
+		customer_feedback, 
+		Avg(satisfaction) over (partition by vehicle_cat, quarter_number) as rate_count
+
+from vehicle_analysis
+order by 1
+/*__________________________________________________*/
+/*App 2. /*to get the overall rating of shipping companies:*/
+/* First I counted number of vehicles by shipper */
+/*(which meant merging shipper locations), and gave numbers to ratings:*/
+
+With ship_wkload as (
+select st.shipper_name, ot.order_id, ot.quarter_number, 
+	count(ot.order_id) over (partition by st.shipper_name) as quan_shipped,
+	case when ot.customer_feedback = 'Very Bad' then 1 
+			when ot.customer_feedback = 'Bad' then 2
+			when ot.customer_feedback = 'Okay' then 3
+			when ot.customer_feedback = 'Good' then 4
+			when ot.customer_feedback = 'Very Good' then 5
+		else 0 end as satisfaction
+        
+from shipper_t as st
+join order_t as ot using(shipper_id)
+
+order by 1)
+
+/*then I average the shipper ratings and listed the count for each*/
+/*in excel, I grouped the ratings to calculate percentages.*/
+
+select distinct shipper_name, quan_shipped, 
+	avg(satisfaction) over (partition by shipper_name) as ship_rating
+
+from ship_wkload
+order by 3 desc;
+
+/*__________________________________________________*/
+/*App 3. Review of Q3: Is satisfaction connected to the age of the car?*/
+/* First to give a numerical value to the rating, and */
+/*secondly, to see if the age of the car affected the ratings.)*/
+
+With vehicle_analysis as (
+select quarter_number, order_id, vehicle_maker, vehicle_model_year, 
+	case when vehicle_model_year <=1975 then 'Antique'
+			when vehicle_model_year between 1976 and 1999 then 'Classic'
+			when vehicle_model_year >=2000 then 'Used'
+		else 0 end as Vehicle_cat,
+	customer_feedback,
+	case when customer_feedback = 'Very Bad' then 1 
+			when customer_feedback = 'Bad' then 2
+			when customer_feedback = 'Okay' then 3
+			when customer_feedback = 'Good' then 4
+			when customer_feedback = 'Very Good' then 5
+		else 0 end as satisfaction
+        
+from product_t 
+right join order_t using(product_id) 
+order by 1,4)
+
+/*Then I actually had to tally the ratings according to quarter, and */
+/*then I added categories of vehicles by age, then tallied those ratings.*/
+/*I had to remove duplicates in excel.*/
+select quarter_number, vehicle_cat,
+		round(avg(satisfaction) over (partition by quarter_number),2) as satisfy_count,
+		count(vehicle_cat) over (partition by vehicle_cat, quarter_number) as type_count,
+		Round(Avg(satisfaction) over (partition by vehicle_cat, quarter_number),2) as rate_count
+
+from vehicle_analysis
+order by 1, 2
+/*__________________________________________________*/
+/*App 4. Q4&5 Narrow down top brands by eliminating less popular cars*/
+/*two variations on getting top vehicle makers - the first eliminates states that only have one of a brand sold:*/
+
+SELECT state, vehicle_maker, 
+	dense_RANK() OVER (PARTITION BY state ORDER BY no_auto_state DESC) AS Sales_RANK,
+	no_auto_state
+    
+from Auto_by_state
+where no_auto_state!= 1
+
+/*the second narrows the top automaker for each state to the top five brands:*/
+With state_sales as (
+SELECT state, vehicle_maker, 
+	no_auto_state,
+    dense_RANK() OVER (PARTITION BY state ORDER BY no_auto_state DESC) AS Sales_RANK
+
+from Auto_by_state
+where vehicle_maker in ('Chevrolet','Ford','Toyota','Pontiac','Dodge'))
+
+select distinct state, vehicle_maker, sales_rank
+
+from state_sales
+where sales_rank = 1
+*/ --------------------------------------------------------Done----------------------------------------------------------------------*/
+*/----------------------------------------------------------------------------------------------------------------------------------*/
